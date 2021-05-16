@@ -1,0 +1,146 @@
+service: sls-sample-project
+
+frameworkVersion: '2'
+
+provider:
+  name: aws
+  runtime: python3.8
+  stage: dev
+  region: us-east-1
+  lambdaHashingVersion: 20201221
+  memorySize: 128
+  timeout: 10
+  logRetentionInDays: 7
+
+plugins:
+  - serverless-step-functions
+
+
+package:
+  patterns:
+    - '!./**/**'
+    - '!./**'
+  individually: true
+
+
+functions:
+  CreateList:
+    handler: src/create_list.lambda_handler
+    package:
+      patterns:
+        - src/**
+  MainProcess:
+    handler: src/process.lambda_handler
+    package:
+      patterns:
+        - src/**
+
+
+stepFunctions:
+  stateMachines:
+    SampleState:
+      role:
+        Fn::GetAtt: ["StateMachineRole", "Arn"]
+      definition:
+        Comment: >-
+          Sample StepFunctions
+        StartAt: StartProcess?
+        States:
+          StartProcess?:
+            Type: Choice
+            Choices:
+              - Variable: $
+                StringEquals: No messages
+                Next: Finish
+            Default: Create List
+
+          Create List:
+            Type: Task
+            Resource: 
+              Fn::GetAtt: [CreateList, Arn]
+            InputPath: $
+            ResultPath: $
+            Next: MAP Process
+          
+          MAP Process:
+            Type: Map
+            Next: Finish
+            Iterator:
+              StartAt: Get Item from DynamoDB
+              States:
+                Get Item from DynamoDB:
+                  Type: Task
+                  Resource: arn:aws:states:::dynamodb:getItem
+                  ResultPath: $.DynamoDB
+                  Parameters:
+                    TableName: sample-dynamodb
+                    Key:
+                      NameID:
+                        S.$: $.name_id
+                  Next: Lambda Process
+                Lambda Process:
+                  Type: Task
+                  Resource: 
+                    Fn::GetAtt: [MainProcess, Arn]
+                  InputPath: $
+                  ResultPath: $.result
+                  Next: JudgeSucceedInMap
+                JudgeSucceedInMap:
+                  Type: Choice
+                  Choices:
+                    - Variable: $.result
+                      IsNull: true
+                      Next: NoItems
+                  Default: SuccessInMap
+                SuccessInMap:
+                  Type: Pass
+                  Result:
+                    is_succeed: true
+                  ResultPath: $.is_succeed
+                  End: true
+                NoItems:
+                  Type: Pass
+                  Result:
+                    is_succeed: False
+                  ResultPath: $.is_succeed
+                  End: true
+
+          Finish:
+            Type: Succeed
+
+resources:
+  Resources:
+    # DynamoDBの構築
+    DynamoDbTable:
+      Type: 'AWS::DynamoDB::Table'
+      Properties:
+        AttributeDefinitions:
+          -
+            AttributeName: NameID
+            AttributeType: S
+
+        # プロビジョニングするキャパシティーユニットの設定
+        KeySchema:
+          -
+            AttributeName: NameID
+            KeyType: HASH
+        ProvisionedThroughput:
+          ReadCapacityUnits: 1
+          WriteCapacityUnits: 1
+        # テーブル名の指定
+        TableName: sample-dynamodb
+    StateMachineRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: RoleName
+        Path: /path_of_state_machine_roles/
+        AssumeRolePolicyDocument:
+          Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - states.amazonaws.com
+            Action:
+              - sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/PowerUserAccess
